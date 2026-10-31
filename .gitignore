@@ -1,0 +1,7 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+# Local secrets (public-data service key)
+env/
+*.local.json

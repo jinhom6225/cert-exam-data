@@ -1,0 +1,86 @@
+name: certexam collect
+
+# Builds certexam/exams.json for the cert_exam_alert app once a day
+# (03:10 KST). Fails without committing when a call or validation fails,
+# so the app keeps yesterday's copy.
+
+on:
+  schedule:
+    - cron: "10 18 * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Fetch getJMList for every item (first run)"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: certexam
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Unit tests
+        run: python -m unittest discover -s tools/certexam/tests -t .
+
+      - name: Collect
+        env:
+          DATA_GO_KR_SERVICE_KEY: ${{ secrets.DATA_GO_KR_SERVICE_KEY }}
+          FULL_RUN: ${{ inputs.full }}
+        run: |
+          set -eu
+          python -m tools.certexam.mask_key
+          if [ "${FULL_RUN:-false}" = "true" ]; then
+            python -m tools.certexam.collect --full
+          else
+            python -m tools.certexam.collect
+          fi
+
+      # The token reaches git only in this step, as a per-command header
+      # (checkout does not persist credentials).
+      - name: Commit changes
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git add -A certexam
+          if git diff --cached --quiet -- certexam; then
+            echo "certexam: no changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(certexam): update exams.json"
+          auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')"
+          echo "::add-mask::${auth}"
+          git_auth() {
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" "$@"
+          }
+          for attempt in 1 2 3; do
+            if git_auth pull --rebase origin "${GITHUB_REF_NAME}" \
+              && git_auth push origin "HEAD:${GITHUB_REF_NAME}"; then
+              exit 0
+            fi
+            echo "push attempt ${attempt} failed"
+            git rebase --abort 2>/dev/null || true
+            sleep $((attempt * 5))
+          done
+          exit 1
