@@ -48,7 +48,3 @@ class BudgetExceeded(CollectorError):
 
 class ValidationFailed(CollectorError):
     """The generated document failed validation and must not be written."""
-
-
-class TooManyFailures(CollectorError):
-    """Per-item calls failed for more than the allowed share of targets."""

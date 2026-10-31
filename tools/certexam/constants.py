@@ -73,7 +73,9 @@ ALW_MAX_PAGES = 10
 USAGE_EXIT_CODE = 64
 
 ROTATION_DAYS = 7
-MAX_ITEM_FAILURE_PERCENT = 5
+# Plan A8: per-item getJMList/getFeeList failures never fail the run; more
+# than this share of the day's targets failing logs one warning line.
+PER_ITEM_WARN_PERCENT = 20
 MAX_ITEM_COUNT_DROP_PERCENT = 10
 
 SCHEMA_VERSION = 1

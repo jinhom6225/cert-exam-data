@@ -103,6 +103,7 @@ class OfflineDryRunTest(unittest.TestCase):
             craftsman_unknown = [i for i in doc["items"] if i["regularOnly"] is None]
             self.assertTrue(all(i["grade"] == "기능사" for i in craftsman_unknown))
             self.assertIn("result=written", result.out)
+            self.assertIn("jmFailed=0 feeFailed=0 ", result.out)
             self.assertIn(f"bytes={len(out.read_bytes())} ", result.out)
 
     def test_second_run_is_unchanged_and_keeps_generated_at(self):
@@ -157,27 +158,75 @@ class LiveModeRulesTest(unittest.TestCase):
             self.assertEqual(result.code, 0, result.text)
             self.assertIn("jmlist:1", result.out)
 
-    def test_up_to_five_percent_failures_keep_previous_values(self):
+    def todays_targets(self, jm_cd="1320"):
+        return [c for i, c in enumerate(JM_CODES) if i % 7 == JM_CODES.index(jm_cd) % 7]
+
+    def test_13_of_73_get_jm_list_failures_exit_0_and_keep_previous_values(self):
+        # First scheduled run (run 41243712032): 13 of 73 failed -> was exit 1.
         with temp_dir() as tmp:
             out = self.previous_file(tmp)
-            when = run_day_for("1320")
-            todays = [c for i, c in enumerate(JM_CODES) if i % 7 == JM_CODES.index("1320") % 7]
-            failing = {"1320"} | set(todays[:2])
+            todays = self.todays_targets()
+            failing = {"1320"} | set(c for c in todays if c != "1320")
+            failing = set(sorted(failing, key=lambda c: c != "1320")[:13])
+            self.assertEqual((len(todays), len(failing)), (73, 13))
             transport = ScriptedTransport(fail_items("getJMList", failing))
-            result = run_collect(["--out", str(out)], transport=transport, clock=FakeClock(when))
+            result = run_collect(["--out", str(out)], transport=transport, clock=FakeClock(run_day_for("1320")))
             self.assertEqual(result.code, 0, result.text)
             item = {i["jmCd"]: i for i in read_json(out)["items"]}["1320"]
             self.assertEqual([r["basis"] for r in item["rounds"]], ["item"] * 3)
+            self.assertIn("getJMList=60/73 ", result.out)
+            self.assertIn("jmFailed=13 feeFailed=0 ", result.out)
+            self.assertIn("1320: getJMList request failed (timeout)", result.out)
+            # 13/73 = 17.8%: under the 20% warning line.
+            self.assertNotIn("warning: getJMList", result.out)
+            self.assertEqual(result.err, "")
 
-    def test_more_than_five_percent_failures_exit_1_without_writing(self):
+    def test_over_twenty_percent_failures_warn_and_exit_0(self):
+        with temp_dir() as tmp:
+            out = self.previous_file(tmp)
+            failing = set(self.todays_targets()[:15])  # 15/73 = 20.5%
+            transport = ScriptedTransport(fail_items("getJMList", failing))
+            result = run_collect(["--out", str(out)], transport=transport, clock=FakeClock(run_day_for("1320")))
+        self.assertEqual(result.code, 0, result.text)
+        self.assertIn("warning: getJMList failed for 15 of 73 items", result.out)
+        self.assertEqual(result.out.count("warning:"), 1)
+
+    def test_twenty_percent_exactly_does_not_warn(self):
+        # 20% of 73 targets is 14.6, so 14 failures stay quiet.
+        with temp_dir() as tmp:
+            out = self.previous_file(tmp)
+            failing = set(self.todays_targets()[:14])
+            transport = ScriptedTransport(fail_items("getFeeList", failing))
+            result = run_collect(["--out", str(out)], transport=transport, clock=FakeClock(run_day_for("1320")))
+        self.assertEqual(result.code, 0, result.text)
+        self.assertIn("feeFailed=14 ", result.out)
+        self.assertNotIn("warning:", result.out)
+
+    def test_all_per_item_calls_failing_exit_0_and_leave_the_file_unchanged(self):
         with temp_dir() as tmp:
             out = self.previous_file(tmp)
             before = out.read_bytes()
-            transport = ScriptedTransport(fail_items("getFeeList", set(JM_CODES[:100])))
-            result = run_collect(["--out", str(out)], transport=transport)
-            self.assertEqual(result.code, 1)
-            self.assertIn("getFeeList failed for", result.err)
+            def script(request):
+                if request.operation in ("getJMList", "getFeeList"):
+                    return CallFailed(request.operation, "result not OK", result_code="99")
+                return None
+
+            later = FakeClock(SUNDAY_RUN + timedelta(days=7))
+            result = run_collect(["--out", str(out)], transport=ScriptedTransport(script), clock=later)
+            self.assertEqual(result.code, 0, result.text)
+            self.assertIn("warning: getJMList failed for 73 of 73 items", result.out)
+            self.assertIn("warning: getFeeList failed for 73 of 73 items", result.out)
+            self.assertIn("jmFailed=73 feeFailed=73 ", result.out)
+            self.assertIn("result=unchanged", result.out)
             self.assertEqual(out.read_bytes(), before)
+
+    def test_per_item_call_guard_is_not_fatal(self):
+        with temp_dir() as tmp, mock.patch.dict(budget.DAILY_CALL_LIMITS, {"ntq": 20}):
+            result = run_collect(["--out", str(tmp / "x.json")])
+        self.assertEqual(result.code, 0, result.text)
+        self.assertIn("getJMList stopped: daily call guard reached for ntq", result.out)
+        self.assertIn("getFeeList stopped: daily call guard reached for ntq", result.out)
+        self.assertIn("calls=alw:1,ntq:20,", result.out)
 
     def test_daily_grade_list_failure_exits_1(self):
         def script(request):
@@ -193,8 +242,9 @@ class LiveModeRulesTest(unittest.TestCase):
             self.assertEqual(clock.sleeps, [2.0, 4.0])
             self.assertFalse((tmp / "x.json").exists())
 
-    def test_call_guard_exits_1(self):
-        with temp_dir() as tmp, mock.patch.dict(budget.DAILY_CALL_LIMITS, {"ntq": 20}):
+    def test_core_call_guard_exits_1(self):
+        # The grade lists need 4 ntq calls; the guard is reached inside them.
+        with temp_dir() as tmp, mock.patch.dict(budget.DAILY_CALL_LIMITS, {"ntq": 2}):
             result = run_collect(["--out", str(tmp / "x.json")])
             self.assertEqual(result.code, 1)
             self.assertIn("daily call guard reached for ntq", result.err)
@@ -214,15 +264,17 @@ class LiveModeRulesTest(unittest.TestCase):
             item = {i["jmCd"]: i for i in read_json(out)["items"]}["1320"]
             self.assertEqual([r["basis"] for r in item["rounds"]], ["item"] * 3)
 
-    def test_failures_among_attempted_items_still_count_after_deadline(self):
+    def test_failures_before_the_deadline_are_counted_skips_are_not(self):
         fail_all = ScriptedTransport(fail_items("getJMList", set(JM_CODES)))
         with temp_dir() as tmp:
             result = run_collect(["--out", str(tmp / "x.json")], transport=fail_all, clock=FakeClock(SUNDAY_RUN, tick=120.0))
-            self.assertEqual(result.code, 1)
-            self.assertIn("getJMList failed for", result.err)
+        self.assertEqual(result.code, 0, result.text)
+        self.assertRegex(result.out, r"jmFailed=[1-9]\d* ")
+        self.assertNotIn("jmFailed=73 ", result.out)
+        self.assertNotIn("warning: getJMList", result.out)
 
-    def test_five_percent_rule_uses_planned_targets(self):
-        # 5 attempts before the deadline, 2 of them fail: 2/73 planned is under 5%.
+    def test_warning_ratio_uses_planned_targets(self):
+        # 5 attempts before the deadline, 2 of them fail: 2/73 planned, no warning.
         attempted = [c for i, c in enumerate(JM_CODES) if i % 7 == 6][:2]
         transport = ScriptedTransport(fail_items("getJMList", set(attempted)))
         clock = RequestClock(SUNDAY_RUN, transport, lambda r: r.operation == "getJMList", 5)
@@ -230,6 +282,8 @@ class LiveModeRulesTest(unittest.TestCase):
             result = run_collect(["--out", str(tmp / "x.json")], transport=transport, clock=clock)
         self.assertEqual(result.code, 0, result.text)
         self.assertIn("getJMList=3/73", result.out)
+        self.assertIn("jmFailed=2 ", result.out)
+        self.assertNotIn("warning: getJMList", result.out)
 
     def test_deadline_is_measured_from_run_start_minus_worst_call(self):
         # 1410 s after start is past 25 min minus one worst-case call (96 s).

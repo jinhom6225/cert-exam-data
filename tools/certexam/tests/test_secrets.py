@@ -81,7 +81,8 @@ class KeyLeakTest(unittest.TestCase):
 
         with temp_dir() as tmp:
             result = run_collect(["--out", str(tmp / "x.json")], transport=ScriptedTransport(script))
-            self.assertEqual(result.code, 1)
+            self.assertEqual(result.code, 0, result.text)  # plan A8: per-item failures are not fatal
+            self.assertIn("warning:", result.out)
             self.assert_no_leak(result.text)
             (tmp / "x.json").write_text("{", encoding="utf-8")
             result = run_collect(["--out", str(tmp / "x.json")])

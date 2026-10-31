@@ -1,5 +1,5 @@
-"""Calls for one run. Daily calls are fatal on failure; per-item calls are
-collected with a failure list so the caller can apply the 5% rule."""
+"""Calls for one run. Core daily calls are fatal on failure; per-item calls
+are collected with a failure list and never fail the run (plan A8)."""
 
 from dataclasses import dataclass
 from typing import Callable, Dict, FrozenSet, Generic, List, Optional, Sequence, Tuple, TypeVar
@@ -112,6 +112,11 @@ def fetch_per_item(
             log(f"{jm_cd}: {error.describe()}")
             failed.append(jm_cd)
             continue
+        except BudgetExceeded as error:
+            # Plan A8: the call guard stops the remaining items, not the run.
+            log(f"{operation} stopped: {error}")
+            failed.extend(targets[index:])
+            break
         results[jm_cd] = parse(payload.rows)
     return ItemFetch(results=results, failed=tuple(failed), skipped=tuple(skipped))
 

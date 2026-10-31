@@ -59,6 +59,11 @@ python3 -m tools.certexam.collect --full   # getJMList for every item
 - Run deadline: no per-item call starts later than 25 min after start minus
   one worst-case call (96 s). Items not reached keep their previous values
   (`skippedAtDeadline` in the summary) and are not failures.
+- Per-item calls (getJMList, getFeeList) never fail the run (plan A8): a
+  failed item keeps its previous values, and reaching the call guard stops
+  the remaining items the same way. More than 20% of the day's planned
+  targets failing logs one `warning:` line; the exit code stays 0. The
+  summary shows `jmFailed=` and `feeFailed=`.
 - An empty getJMList answer keeps the item's previous item-basis rounds.
 - An item dropped by validation keeps its previous valid record
   (`restoredItems` in the summary).
@@ -68,7 +73,7 @@ python3 -m tools.certexam.collect --full   # getJMList for every item
 | Code | Meaning | File |
 |---|---|---|
 | 0 | unchanged, or written | written only when content other than `generatedAt` changed |
-| 1 | call or configuration failure (missing key, daily call failed after retries, more than 5% of today's planned items failed, call guard, run deadline) | not written |
+| 1 | core call or configuration failure (missing key; a grade list or qualExamSchd year list failed after retries or hit the call guard) | not written |
 | 2 | validation failure (too many invalid items, item count fell over 10%, output over 2MB, unreadable previous file) | not written |
 | 64 | invalid command-line arguments (not echoed) | not written |
 

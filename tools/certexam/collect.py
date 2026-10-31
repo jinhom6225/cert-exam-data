@@ -18,7 +18,7 @@ from .budget import CallBudget, plan_run, should_fetch_jm_list
 from .constants import (
     KEY_ENV,
     MAX_ITEM_COUNT_DROP_PERCENT,
-    MAX_ITEM_FAILURE_PERCENT,
+    PER_ITEM_WARN_PERCENT,
     QUAL_ITEM_TIME_SHARE,
     QUAL_ITEM_WARN_PERCENT,
     RUN_DEADLINE_SECONDS,
@@ -27,7 +27,7 @@ from .constants import (
     USAGE_EXIT_CODE,
     WORST_CALL_SECONDS,
 )
-from .errors import CallFailed, CollectorError, ConfigError, TooManyFailures, ValidationFailed
+from .errors import CallFailed, CollectorError, ConfigError, ValidationFailed
 from .fetch import (
     ItemFetch,
     fetch_always_names,
@@ -107,13 +107,15 @@ def _load_jm_list(path: Path) -> List[JmEntry]:
     return entries
 
 
-def check_failures(operation: str, fetched: ItemFetch, targets: Sequence[str]) -> None:
-    """Up to 5% of today's planned targets may fail (they keep previous
-    values). Targets skipped at the run deadline also keep previous values
-    and are not failures."""
+def warn_item_failures(
+    operation: str, fetched: ItemFetch, targets: Sequence[str], log: Callable[[str], None]
+) -> None:
+    """Plan A8: failed items keep their previous values and never fail the
+    run. More than 20% of today's planned targets failing logs one warning.
+    Targets skipped at the run deadline are not failures."""
     failed = len(fetched.failed)
-    if failed * 100 > len(targets) * MAX_ITEM_FAILURE_PERCENT:
-        raise TooManyFailures(f"{operation} failed for {failed} of {len(targets)} items")
+    if failed * 100 > len(targets) * PER_ITEM_WARN_PERCENT:
+        log(f"warning: {operation} failed for {failed} of {len(targets)} items")
 
 
 def warn_qual_failures(fetched: ItemFetch, targets: Sequence[str], log: Callable[[str], None]) -> None:
@@ -231,8 +233,8 @@ def _collect(
         client, "getJMList", plan.jm_targets, parse_item_schedule, out_of_time, log
     )
     fees = fetch_per_item(client, "getFeeList", plan.fee_targets, parse_fee, out_of_time, log)
-    check_failures("getJMList", schedules, plan.jm_targets)
-    check_failures("getFeeList", fees, plan.fee_targets)
+    warn_item_failures("getJMList", schedules, plan.jm_targets, log)
+    warn_item_failures("getFeeList", fees, plan.fee_targets, log)
     previous_items = {
         str(item.get("jmCd")): item
         for item in (previous or {}).get("items", [])  # type: ignore[union-attr]
@@ -271,6 +273,7 @@ def _summary(
         f"certexam: items={len(items)} rounds={rounds} "  # type: ignore[arg-type]
         f"getJMList={len(collected.schedules.results)}/{collected.jm_targets} "
         f"getFeeList={len(collected.fees.results)}/{collected.fee_targets} "
+        f"jmFailed={len(collected.schedules.failed)} feeFailed={len(collected.fees.failed)} "
         f"qualItem={len(collected.verdicts.results)}/{collected.verdict_targets} "
         f"qualSkipped={len(collected.verdicts.skipped)} "
         f"qualVerdict={_verdict_counts(collected.verdicts)} "
