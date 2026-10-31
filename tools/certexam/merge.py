@@ -22,6 +22,7 @@ class MergeInputs:
     fees: Mapping[str, Optional[Dict[str, int]]] = field(default_factory=dict)
     previous_items: Mapping[str, Item] = field(default_factory=dict)
     always_names: FrozenSet[str] = frozenset()
+    qual_verdicts: Mapping[str, Optional[bool]] = field(default_factory=dict)
 
 
 def _item_rounds(
@@ -46,17 +47,21 @@ def _item_rounds(
 
 def _regular_only(
     schedule: Optional[ItemSchedule],
+    qual_verdict: Optional[bool],
     previous: Optional[Item],
     name: str,
     grade: str,
     always_names: FrozenSet[str],
 ) -> Optional[bool]:
-    """getJMList verdict today > previous value > default.
+    """Today's getJMList verdict > today's qualExamSchd verdict (plan A7) >
+    previous true/false > default.
 
     상시 검정 exists only for 기능사, so every other grade defaults to True.
     기능사 falls back to the 15088943 name hint, then None (unknown)."""
     if schedule is not None and schedule.regular_only is not None:
         return schedule.regular_only
+    if qual_verdict is not None:
+        return qual_verdict
     previous_value = (previous or {}).get("regularOnly")
     if isinstance(previous_value, bool):
         return previous_value
@@ -83,7 +88,9 @@ def merge_item(entry: JmEntry, inputs: MergeInputs) -> Item:
     schedule = inputs.item_schedules.get(jm_cd)
     previous = inputs.previous_items.get(jm_cd)
     item_rounds, covered = _item_rounds(schedule, previous)
-    regular_only = _regular_only(schedule, previous, name, grade, inputs.always_names)
+    regular_only = _regular_only(
+        schedule, inputs.qual_verdicts.get(jm_cd), previous, name, grade, inputs.always_names
+    )
     merged = _grade_rounds_for(grade, regular_only, covered, inputs.grade_rounds)
     merged.update({(int(r["year"]), int(r["seq"])): r for r in item_rounds})
     if jm_cd in inputs.fees:

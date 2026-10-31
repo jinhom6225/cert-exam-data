@@ -19,6 +19,8 @@ from .constants import (
     KEY_ENV,
     MAX_ITEM_COUNT_DROP_PERCENT,
     MAX_ITEM_FAILURE_PERCENT,
+    QUAL_ITEM_TIME_SHARE,
+    QUAL_ITEM_WARN_PERCENT,
     RUN_DEADLINE_SECONDS,
     SCHEMA_VERSION,
     SOURCE,
@@ -33,8 +35,9 @@ from .fetch import (
     fetch_jm_entries,
     fetch_per_item,
     fetch_qual_rows,
+    fetch_qual_verdicts,
 )
-from .merge import MergeInputs, merge_items, universe_from_previous
+from .merge import CRAFTSMAN, MergeInputs, merge_items, universe_from_previous
 from .offline import FixtureTransport
 from .parse_fee import parse_fee
 from .parse_grade import combine_grade_rounds, parse_qual_schedule
@@ -113,6 +116,26 @@ def check_failures(operation: str, fetched: ItemFetch, targets: Sequence[str]) -
         raise TooManyFailures(f"{operation} failed for {failed} of {len(targets)} items")
 
 
+def warn_qual_failures(fetched: ItemFetch, targets: Sequence[str], log: Callable[[str], None]) -> None:
+    """Plan A7 ⑤: verdict failures never fail the run. Failed plus
+    deadline-skipped items over 20% of the targets only log a warning."""
+    missed = len(fetched.failed) + len(fetched.skipped)
+    if missed * 100 > len(targets) * QUAL_ITEM_WARN_PERCENT:
+        log(
+            f"warning: qualExamSchd item verdict failed or skipped for "
+            f"{missed} of {len(targets)} items"
+        )
+
+
+def _verdict_counts(fetched: ItemFetch) -> str:
+    values = list(fetched.results.values())
+    return "true:{t},false:{f},none:{n}".format(
+        t=sum(1 for v in values if v is True),
+        f=sum(1 for v in values if v is False),
+        n=sum(1 for v in values if v is None),
+    )
+
+
 def check_item_count(previous: Optional[Dict[str, object]], items: Sequence[object]) -> None:
     if previous is None:
         return
@@ -129,6 +152,8 @@ class Collected:
     jm_targets: int
     fee_targets: int
     previous_items: Dict[str, Dict[str, object]]
+    verdicts: ItemFetch
+    verdict_targets: int
 
 
 def _open_client(args: argparse.Namespace, deps: Deps) -> Tuple[Client, Optional[FixtureTransport]]:
@@ -182,11 +207,26 @@ def _collect(
     qual = parse_qual_schedule(fetch_qual_rows(client, (plan.kst_year, plan.kst_year + 1)), log)
     always = fetch_always_names(client, log) or frozenset()
 
+    # Per-item calls: qualExamSchd verdicts first (https, fast and reliable;
+    # capped at a third of the time left for per-item calls so getJMList is
+    # not starved), then the getJMList rotation, then getFeeList.
+    per_item_start = deps.monotonic()
     last_call_start = started + RUN_DEADLINE_SECONDS - WORST_CALL_SECONDS
+    time_left = max(0.0, last_call_start - per_item_start)
+    last_qual_start = per_item_start + time_left * QUAL_ITEM_TIME_SHARE
 
     def out_of_time() -> bool:
         return deps.monotonic() > last_call_start
 
+    def qual_out_of_time() -> bool:
+        # >= so an empty window (deadline already passed) starts no call.
+        return deps.monotonic() >= last_qual_start
+
+    craftsmen = tuple(
+        sorted(str(entry["jmCd"]) for entry in universe if entry.get("grade") == CRAFTSMAN)
+    )
+    verdicts = fetch_qual_verdicts(client, craftsmen, plan.kst_year, qual_out_of_time, log)
+    warn_qual_failures(verdicts, craftsmen, log)
     schedules = fetch_per_item(
         client, "getJMList", plan.jm_targets, parse_item_schedule, out_of_time, log
     )
@@ -206,10 +246,18 @@ def _collect(
             fees=fees.results,
             previous_items=previous_items,
             always_names=always,
+            qual_verdicts=verdicts.results,
         )
     )
     return Collected(
-        items, schedules, fees, len(plan.jm_targets), len(plan.fee_targets), previous_items
+        items,
+        schedules,
+        fees,
+        len(plan.jm_targets),
+        len(plan.fee_targets),
+        previous_items,
+        verdicts,
+        len(craftsmen),
     )
 
 
@@ -223,6 +271,9 @@ def _summary(
         f"certexam: items={len(items)} rounds={rounds} "  # type: ignore[arg-type]
         f"getJMList={len(collected.schedules.results)}/{collected.jm_targets} "
         f"getFeeList={len(collected.fees.results)}/{collected.fee_targets} "
+        f"qualItem={len(collected.verdicts.results)}/{collected.verdict_targets} "
+        f"qualSkipped={len(collected.verdicts.skipped)} "
+        f"qualVerdict={_verdict_counts(collected.verdicts)} "
         f"skippedAtDeadline={len(collected.schedules.skipped) + len(collected.fees.skipped)} "
         f"droppedItems={len(report.dropped_items)} restoredItems={len(report.restored_items)} "
         f"droppedRounds={report.dropped_rounds} bytes={result.size} "

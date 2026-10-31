@@ -60,6 +60,13 @@ WORST_CALL_SECONDS = TIMEOUT_SECONDS * (RETRIES + 1) + BACKOFF_BASE_SECONDS * 3
 
 QUAL_PAGE_SIZE = 50  # API limit: more answers resultCode 930
 QUAL_MAX_PAGES = 20
+# Plan A7: per-item qualExamSchd for every 기능사 item, verdict only.
+QUAL_ITEM_PAGE_SIZE = 50
+QUAL_ITEM_MAX_PAGES = 5
+# Share of the per-item time budget the verdict calls may use before
+# getJMList starts, and the failure share that logs a warning.
+QUAL_ITEM_TIME_SHARE = 1 / 3
+QUAL_ITEM_WARN_PERCENT = 20
 ALW_PAGE_SIZE = 100
 ALW_MAX_PAGES = 10
 

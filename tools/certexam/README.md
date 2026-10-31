@@ -38,6 +38,19 @@ python3 -m tools.certexam.collect --full   # getJMList for every item
 ```
 
 - Daily: 4 grade lists, qualExamSchd (this and next year), always-held list.
+- Daily (plan A7): qualExamSchd per 기능사 item (this KST year, `jmCd`,
+  50 rows per page, all pages) for the 정기·상시 verdict only. A round with a
+  2-row pair sharing the exam date is regular; more than 10 unpaired rounds
+  means 상시. Regular only -> `true`, any 상시 -> `false`, no rows -> no
+  verdict; a paired round beside 1-10 unpaired rounds is still `true` and
+  logs a "gray zone" line (jmCd only). These calls run before the getJMList
+  rotation and stop starting after one third of the time left for per-item
+  calls (measured from the start of that stage). A failed or skipped item
+  keeps its previous value; over 20% failed or skipped only logs a warning
+  (exit code unchanged). The summary shows `qualItem=`, `qualSkipped=` and
+  `qualVerdict=`.
+- `regularOnly` priority: today's getJMList -> today's qualExamSchd verdict
+  -> previous true/false -> (non-기능사: `true`) -> 15088943 names -> `null`.
 - getJMList and getFeeList: items whose position (jmCd order) % 7 equals the
   KST weekday (Monday 0). `--full` covers every item for getJMList only.
 - Item list (15003024): Mondays (KST) or `--full`; if that call fails the run

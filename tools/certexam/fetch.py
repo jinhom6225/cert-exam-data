@@ -11,14 +11,17 @@ from .constants import (
     API_JMLIST,
     API_NTQ,
     API_QUAL,
+    QUAL_ITEM_MAX_PAGES,
+    QUAL_ITEM_PAGE_SIZE,
     QUAL_MAX_PAGES,
     QUAL_PAGE_SIZE,
 )
-from .errors import CallFailed
+from .errors import BudgetExceeded, CallFailed
 from .parse_grade import GRADE_OPERATIONS, GroupRounds, parse_grade_list
 from .parse_lists import JmEntry, parse_always_names, parse_jm_list
 from .payload import Row
 from .qnet_client import ApiRequest, Client
+from .qual_verdict import count_rounds, is_gray_zone, verdict_from_counts
 
 T = TypeVar("T")
 Log = Callable[[str], None]
@@ -99,10 +102,10 @@ def fetch_per_item(
     results: Dict[str, T] = {}
     failed: List[str] = []
     skipped: List[str] = []
-    for jm_cd in targets:
+    for index, jm_cd in enumerate(targets):
         if out_of_time():
-            skipped.append(jm_cd)
-            continue
+            skipped.extend(targets[index:])
+            break
         try:
             payload = client.call(ApiRequest(API_NTQ, operation, (("jmCd", jm_cd),)))
         except CallFailed as error:
@@ -110,4 +113,47 @@ def fetch_per_item(
             failed.append(jm_cd)
             continue
         results[jm_cd] = parse(payload.rows)
+    return ItemFetch(results=results, failed=tuple(failed), skipped=tuple(skipped))
+
+
+def fetch_qual_verdicts(
+    client: Client,
+    targets: Sequence[str],
+    year: int,
+    out_of_time: Callable[[], bool],
+    log: Log,
+) -> ItemFetch[Optional[bool]]:
+    """Plan A7: qualExamSchd per 기능사 item (all pages) -> 정기·상시 verdict.
+
+    Never raises for one item: failures are listed (the item keeps its
+    previous verdict). Reaching the 15074408 call guard stops the remaining
+    items the same way; the year lists were fetched earlier."""
+    results: Dict[str, Optional[bool]] = {}
+    failed: List[str] = []
+    skipped: List[str] = []
+    for index, jm_cd in enumerate(targets):
+        if out_of_time():
+            skipped.extend(targets[index:])
+            break
+        params = (
+            ("dataFormat", "json"),
+            ("implYy", str(year)),
+            ("qualgbCd", "T"),
+            ("jmCd", jm_cd),
+        )
+        request = ApiRequest(API_QUAL, "getQualExamSchdList", params)
+        try:
+            rows = fetch_paged(client, request, QUAL_ITEM_PAGE_SIZE, QUAL_ITEM_MAX_PAGES)
+        except CallFailed as error:
+            log(f"{jm_cd}: {error.describe()}")
+            failed.append(jm_cd)
+            continue
+        except BudgetExceeded as error:
+            log(f"qualExamSchd item verdicts stopped: {error}")
+            failed.extend(targets[index:])
+            break
+        paired, unpaired = count_rounds(rows, year)
+        if is_gray_zone(paired, unpaired):
+            log(f"{jm_cd}: qual verdict gray zone paired={paired} unpaired={unpaired}")
+        results[jm_cd] = verdict_from_counts(paired, unpaired)
     return ItemFetch(results=results, failed=tuple(failed), skipped=tuple(skipped))

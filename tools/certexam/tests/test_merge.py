@@ -122,6 +122,33 @@ class MergeTest(unittest.TestCase):
     def test_craftsman_without_data_stays_unknown(self):
         self.assertIsNone(only(merge_items(MergeInputs([ELEC], self.grades)), "7780")["regularOnly"])
 
+    def test_today_qual_verdict_beats_previous_value_and_name_hint(self):
+        previous = {"7780": {"jmCd": "7780", "regularOnly": False, "rounds": []}}
+        merged = merge_items(MergeInputs([ELEC], self.grades, previous_items=previous, qual_verdicts={"7780": True}))
+        self.assertIs(only(merged, "7780")["regularOnly"], True)
+        merged = merge_items(MergeInputs([COOK], self.grades, qual_verdicts={"7910": True},
+                                         always_names=frozenset({"한식조리기능사"})))
+        self.assertIs(only(merged, "7910")["regularOnly"], True)
+
+    def test_get_jm_list_verdict_beats_today_qual_verdict(self):
+        today = {"7780": ItemSchedule((), False, frozenset({2026}))}
+        merged = merge_items(MergeInputs([ELEC], self.grades, item_schedules=today, qual_verdicts={"7780": True}))
+        self.assertIs(only(merged, "7780")["regularOnly"], False)
+
+    def test_no_qual_verdict_keeps_previous_value(self):
+        previous = {"7780": {"jmCd": "7780", "regularOnly": True, "rounds": []}}
+        for verdicts in ({"7780": None}, {}):
+            merged = merge_items(MergeInputs([ELEC], self.grades, previous_items=previous, qual_verdicts=verdicts))
+            self.assertIs(only(merged, "7780")["regularOnly"], True)
+
+    def test_qual_verdict_false_drops_regular_grade_rounds(self):
+        merged = merge_items(MergeInputs([ELEC], self.grades, qual_verdicts={"7780": False}))
+        self.assertEqual(only(merged, "7780")["rounds"], [])
+
+    def test_qual_verdict_true_keeps_grade_rounds(self):
+        merged = merge_items(MergeInputs([ELEC], self.grades, qual_verdicts={"7780": True}))
+        self.assertEqual([k[1] for k in keys(only(merged, "7780"))], [1, 2, 3, 4])
+
     def test_empty_get_jm_list_answer_keeps_previous_item_rounds(self):
         previous = {"1320": {"jmCd": "1320", "regularOnly": True,
                              "rounds": [item_round(2026, 1, "2026-01-12"), item_round(2026, 2, "2026-04-20")]}}

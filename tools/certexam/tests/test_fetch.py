@@ -90,6 +90,105 @@ class AlwaysListFetchTest(unittest.TestCase):
         )
 
 
+class QualVerdictFetchTest(unittest.TestCase):
+    def run_fetch(self, script, targets=("7780", "7910"), out_of_time=lambda: False, limit=900):
+        from tools.certexam.fetch import fetch_qual_verdicts
+        from tools.certexam.tests.support import ScriptedTransport
+
+        transport = ScriptedTransport(script)
+        api = Client(transport, "k", CallBudget(limits={"qual": limit}), lambda seconds: None)
+        logs = []
+        result = fetch_qual_verdicts(api, targets, 2026, out_of_time, logs.append)
+        return result, transport, logs
+
+    def test_request_shape_and_fixture_verdicts(self):
+        result, transport, _ = self.run_fetch(lambda r: None)
+        self.assertEqual(result.results, {"7780": True, "7910": False})
+        first = transport.requests[0]
+        self.assertEqual((first.api, first.operation), ("qual", "getQualExamSchdList"))
+        self.assertEqual(
+            (first.param("jmCd"), first.param("implYy"), first.param("qualgbCd"),
+             first.param("numOfRows"), first.param("pageNo"), first.param("dataFormat")),
+            ("7780", "2026", "T", "50", "1", "json"),
+        )
+
+    def test_reads_every_page(self):
+        def script(request):
+            if request.param("jmCd") != "7910":
+                return None
+            seqs = range(1, 51) if request.param("pageNo") == "1" else range(51, 62)
+            items = ",".join(
+                '{"implYy":"2026","implSeq":%d,"docExamStartDt":"2026%02d%02d"}' % (n, n % 12 + 1, n % 28 + 1)
+                for n in seqs
+            )
+            body = '{"header":{"resultCode":"00"},"body":{"items":[%s],"totalCount":61}}' % items
+            return RawResponse(200, body.encode())
+
+        result, transport, _ = self.run_fetch(script, targets=("7910",))
+        self.assertEqual([r.param("pageNo") for r in transport.requests], ["1", "2"])
+        self.assertIs(result.results["7910"], False)
+
+    def test_gray_zone_is_logged_with_jm_cd_only(self):
+        def script(request):
+            pair = '{"implYy":"2026","implSeq":1,"docExamStartDt":"20260120","pracExamStartDt":"20260314"}'
+            singles = ",".join(
+                '{"implYy":"2026","implSeq":%d,"docExamStartDt":"202602%02d"}' % (n, n) for n in range(2, 5)
+            )
+            body = '{"header":{"resultCode":"00"},"body":{"items":[%s,%s,%s],"totalCount":5}}' % (pair, pair, singles)
+            return RawResponse(200, body.encode())
+
+        result, _, logs = self.run_fetch(script, targets=("7780",))
+        self.assertIs(result.results["7780"], True)
+        self.assertEqual(logs, ["7780: qual verdict gray zone paired=1 unpaired=3"])
+
+    def test_fixture_items_are_not_gray(self):
+        _, _, logs = self.run_fetch(lambda r: None)
+        self.assertEqual(logs, [])
+
+    def test_failure_is_reported_not_raised(self):
+        def script(request):
+            return CallFailed("getQualExamSchdList", "request failed (timeout)") if request.param("jmCd") == "7780" else None
+
+        result, _, logs = self.run_fetch(script)
+        self.assertEqual(result.failed, ("7780",))
+        self.assertEqual(result.results, {"7910": False})
+        self.assertIn("7780: getQualExamSchdList request failed (timeout)", logs)
+
+    def test_budget_guard_stops_item_calls_without_raising(self):
+        result, transport, logs = self.run_fetch(lambda r: None, targets=("7780", "7910", "7780"), limit=1)
+        self.assertEqual(len(transport.requests), 1)
+        self.assertEqual(result.failed, ("7910", "7780"))
+        self.assertTrue(any("call guard" in line for line in logs))
+
+    def test_deadline_skips_remaining_targets_without_rechecking(self):
+        checks = []
+
+        def out_of_time():
+            checks.append(1)
+            return len(checks) > 1
+
+        result, transport, _ = self.run_fetch(lambda r: None, targets=("7780", "7910", "7780"), out_of_time=out_of_time)
+        self.assertEqual(result.skipped, ("7910", "7780"))
+        self.assertEqual(len(checks), 2)
+
+
+class OfflineQualItemTest(unittest.TestCase):
+    def send(self, transport, jm_cd, page):
+        params = (("dataFormat", "json"), ("implYy", "2026"), ("qualgbCd", "T"), ("jmCd", jm_cd),
+                  ("numOfRows", "50"), ("pageNo", page))
+        return transport.send(ApiRequest("qual", "getQualExamSchdList", params), "", 30)
+
+    def test_page_one_fixture_and_missing_answers(self):
+        from tools.certexam.offline import FixtureTransport
+
+        transport = FixtureTransport(FIXTURES)
+        self.assertEqual(self.send(transport, "7780", "1").body, (FIXTURES / "qual_2026_T_7780.json").read_bytes())
+        self.assertEqual(self.send(transport, "1234", "1").status, 200)
+        self.assertEqual(transport.missing_pages, [])
+        self.send(transport, "7780", "2")
+        self.assertEqual(transport.missing_pages, ["qual_2026_T_7780_p2.json"])
+
+
 class BuildJmListTest(unittest.TestCase):
     def test_main_writes_the_list(self):
         with temp_dir() as tmp:

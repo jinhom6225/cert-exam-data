@@ -53,6 +53,10 @@ class FixtureTransport:
         page = _part(request.param("pageNo") or "1")
         if request.api == API_QUAL:
             year, kind = _part(request.param("implYy")), _part(request.param("qualgbCd"))
+            jm_cd = request.param("jmCd")
+            if jm_cd is not None:
+                suffix = "" if page == "1" else f"_p{page}"
+                return f"qual_{year}_{kind}_{_part(jm_cd)}{suffix}.json"
             return f"qual_{year}_{kind}_p{page}.json"
         if request.api == API_ALW:
             return f"alw_15088943_p{page}.xml"
@@ -63,7 +67,11 @@ class FixtureTransport:
         path = self._dir / name
         if path.is_file():
             return RawResponse(status=200, body=path.read_bytes())
-        if (request.param("pageNo") or "1") != "1":
+        first_page = (request.param("pageNo") or "1") == "1"
+        if request.api == API_QUAL and request.param("jmCd") is not None and first_page:
+            # Per-item verdict without a saved answer: empty list = no verdict.
+            return RawResponse(status=200, body=_EMPTY_JSON)
+        if not first_page:
             self.missing_pages.append(name)
             empty = _EMPTY_JSON if request.api == API_QUAL else _EMPTY_XML
             return RawResponse(status=200, body=empty)

@@ -43,6 +43,28 @@ def fail_items(operation, codes):
     return script
 
 
+CRAFTSMEN = sorted(
+    e["jmCd"] for e in json.loads((FIXTURES.parent.parent / "jm_list.json").read_text("utf-8")) if e["grade"] == "기능사"
+)
+
+
+def qual_item_requests(transport):
+    return [r for r in transport.requests if r.api == "qual" and r.param("jmCd")]
+
+
+class RequestClock(FakeClock):
+    """monotonic() jumps past every deadline once requests matching `match`
+    have been sent for `count` distinct items (retries count once)."""
+
+    def __init__(self, now, transport, match, count, late=10_000):
+        super().__init__(now)
+        self.transport, self.match, self.count, self.late = transport, match, count, late
+
+    def monotonic(self):
+        sent = {r.param("jmCd") for r in self.transport.requests if self.match(r)}
+        return self.late if len(sent) >= self.count else 0
+
+
 class ScriptedClock(FakeClock):
     """monotonic() returns the given values in order, then repeats the last."""
 
@@ -76,8 +98,8 @@ class OfflineDryRunTest(unittest.TestCase):
             self.assertEqual(items["1320"]["fee"], {"written": 19400, "practical": 22600})
             self.assertEqual([r["seq"] for r in items["0752"]["rounds"]], [138])
             self.assertIs(items["7910"]["regularOnly"], False)
+            self.assertIs(items["7780"]["regularOnly"], True)
             self.assertIs(items["0011"]["regularOnly"], True)
-            self.assertIsNone(items["7780"]["regularOnly"])
             craftsman_unknown = [i for i in doc["items"] if i["regularOnly"] is None]
             self.assertTrue(all(i["grade"] == "기능사" for i in craftsman_unknown))
             self.assertIn("result=written", result.out)
@@ -203,7 +225,7 @@ class LiveModeRulesTest(unittest.TestCase):
         # 5 attempts before the deadline, 2 of them fail: 2/73 planned is under 5%.
         attempted = [c for i, c in enumerate(JM_CODES) if i % 7 == 6][:2]
         transport = ScriptedTransport(fail_items("getJMList", set(attempted)))
-        clock = ScriptedClock(SUNDAY_RUN, [0, 0, 0, 0, 0, 0, 10_000])
+        clock = RequestClock(SUNDAY_RUN, transport, lambda r: r.operation == "getJMList", 5)
         with temp_dir() as tmp:
             result = run_collect(["--out", str(tmp / "x.json")], transport=transport, clock=clock)
         self.assertEqual(result.code, 0, result.text)
@@ -217,6 +239,7 @@ class LiveModeRulesTest(unittest.TestCase):
         self.assertEqual(result.code, 0, result.text)
         self.assertEqual([r for r in result.transport.requests if r.param("jmCd")], [])
         self.assertIn("skippedAtDeadline=146 ", result.out)
+        self.assertIn("qualItem=0/163 qualSkipped=163 ", result.out)
 
     def test_item_dropped_by_validation_keeps_previous_record(self):
         def script(request):
@@ -273,6 +296,95 @@ class LiveModeRulesTest(unittest.TestCase):
             result = run_collect(["--out", str(tmp / "x.json")], transport=ScriptedTransport(script))
             self.assertEqual(result.code, 0, result.text)
             self.assertIn("always-held list skipped", result.out)
+
+    def test_daily_qual_item_calls_for_every_craftsman_before_get_jm_list(self):
+        with temp_dir() as tmp:
+            result = run_collect(["--out", str(tmp / "x.json")])
+        self.assertEqual(result.code, 0, result.text)
+        calls = qual_item_requests(result.transport)
+        self.assertEqual(sorted(r.param("jmCd") for r in calls), CRAFTSMEN)
+        self.assertEqual(len(CRAFTSMEN), 163)
+        self.assertTrue(all(r.param("implYy") == "2026" and r.param("numOfRows") == "50" for r in calls))
+        order = [r.operation for r in result.transport.requests if r.param("jmCd")]
+        self.assertLess(order.index("getQualExamSchdList"), order.index("getJMList"))
+        last_qual = max(i for i, op in enumerate(order) if op == "getQualExamSchdList")
+        self.assertLess(last_qual, order.index("getJMList"))
+        self.assertIn("qualItem=163/163 ", result.out)
+        self.assertIn("qualVerdict=true:1,false:1,none:161 ", result.out)
+        self.assertLess(result.transport.requests.__len__(), 900)
+
+    def test_qual_verdicts_land_in_the_output(self):
+        with temp_dir() as tmp:
+            out = tmp / "x.json"
+            result = run_collect(["--out", str(out)])
+            self.assertEqual(result.code, 0, result.text)
+            items = {i["jmCd"]: i for i in read_json(out)["items"]}
+        self.assertIs(items["7780"]["regularOnly"], True)
+        self.assertIs(items["7910"]["regularOnly"], False)
+        self.assertEqual([r["basis"] for r in items["7780"]["rounds"]], ["grade"] * 4)
+
+    def test_qual_item_failure_keeps_previous_verdict_and_run_succeeds(self):
+        with temp_dir() as tmp:
+            out = tmp / "x.json"
+            self.assertEqual(run_collect(["--out", str(out)]).code, 0)
+            failing = ScriptedTransport(fail_items("getQualExamSchdList", {"7780", "7910"}))
+            result = run_collect(["--out", str(out)], transport=failing)
+            self.assertEqual(result.code, 0, result.text)
+            items = {i["jmCd"]: i for i in read_json(out)["items"]}
+        self.assertIs(items["7780"]["regularOnly"], True)
+        self.assertIs(items["7910"]["regularOnly"], False)
+        self.assertIn("qualItem=161/163 ", result.out)
+        self.assertNotIn("warning", result.out)
+
+    def test_more_than_twenty_percent_qual_failures_only_warn(self):
+        failing = ScriptedTransport(fail_items("getQualExamSchdList", set(CRAFTSMEN[:40])))
+        with temp_dir() as tmp:
+            result = run_collect(["--out", str(tmp / "x.json")], transport=failing)
+        self.assertEqual(result.code, 0, result.text)
+        self.assertIn("warning: qualExamSchd item verdict failed or skipped for 40 of 163", result.out)
+
+    def test_qual_budget_guard_is_not_fatal_and_year_lists_come_first(self):
+        with temp_dir() as tmp, mock.patch.dict(budget.DAILY_CALL_LIMITS, {"qual": 10}):
+            result = run_collect(["--out", str(tmp / "x.json")])
+        self.assertEqual(result.code, 0, result.text)
+        self.assertIn("call guard", result.out)
+        self.assertIn("calls=alw:1,ntq:", result.out)
+        self.assertIn("qual:10 ", result.out)
+
+    def test_qual_items_stop_at_their_share_of_the_run(self):
+        # Past one third of the run budget: no more qual item calls, but
+        # getJMList still runs.
+        transport = ScriptedTransport()
+        is_qual_item = lambda r: r.api == "qual" and r.param("jmCd") is not None  # noqa: E731
+        clock = RequestClock(SUNDAY_RUN, transport, is_qual_item, 5, late=500)
+        with temp_dir() as tmp:
+            result = run_collect(["--out", str(tmp / "x.json")], transport=transport, clock=clock)
+        self.assertEqual(result.code, 0, result.text)
+        self.assertEqual(len(qual_item_requests(result.transport)), 5)
+        self.assertIn("getJMList=73/73 ", result.out)
+        self.assertIn("qualItem=5/163 qualSkipped=158 ", result.out)
+        self.assertIn("warning: qualExamSchd item verdict failed or skipped for 158 of 163", result.out)
+
+    def test_qual_window_starts_at_the_per_item_stage(self):
+        # Daily lists took 900 s: the qual window is a third of what is left
+        # (900 + (1404 - 900) / 3 = 1068), not a third from the run start (468).
+        values = iter([0])
+        clock = FakeClock(SUNDAY_RUN)
+        clock.monotonic = lambda: next(values, 900)
+        with temp_dir() as tmp:
+            result = run_collect(["--out", str(tmp / "x.json")], clock=clock)
+        self.assertEqual(result.code, 0, result.text)
+        self.assertIn("qualItem=163/163 qualSkipped=0 ", result.out)
+        self.assertIn("getJMList=73/73 ", result.out)
+
+    def test_qual_window_is_empty_when_the_deadline_already_passed(self):
+        values = iter([0])
+        clock = FakeClock(SUNDAY_RUN)
+        clock.monotonic = lambda: next(values, 2000)
+        with temp_dir() as tmp:
+            result = run_collect(["--out", str(tmp / "x.json")], clock=clock)
+        self.assertEqual(result.code, 0, result.text)
+        self.assertIn("qualItem=0/163 qualSkipped=163 ", result.out)
 
     def test_missing_key_exits_1(self):
         result = run_collect(["--out", "/nonexistent/x.json"], env={})
