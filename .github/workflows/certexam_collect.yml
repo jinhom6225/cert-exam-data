@@ -3,6 +3,12 @@ name: certexam collect
 # Builds certexam/exams.json for the cert_exam_alert app once a day
 # (03:10 KST). Fails without committing when a call or validation fails,
 # so the app keeps yesterday's copy.
+#
+# Every run also (plan A9):
+#   - sends a Telegram notice: a one-line summary on success, the run URL
+#     on failure (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID; skipped if unset)
+#   - re-enables this workflow so GitHub's 60-day inactivity pause on
+#     public-repo schedules never kicks in (keepalive job)
 
 on:
   schedule:
@@ -11,6 +17,10 @@ on:
     inputs:
       full:
         description: "Fetch getJMList for every item (first run)"
+        type: boolean
+        default: false
+      force_fail:
+        description: "Fail before collecting (checks the failure notice)"
         type: boolean
         default: false
 
@@ -27,6 +37,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Forced failure
+        if: inputs.force_fail
+        run: |
+          echo "force_fail=true: failing on purpose to check the Telegram failure notice"
+          exit 1
+
       - name: Check out
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -40,22 +56,31 @@ jobs:
       - name: Unit tests
         run: python -m unittest discover -s tools/certexam/tests -t .
 
+      # The collector prints the key-free summary line ("certexam: items=...")
+      # and "warning:" lines; both are kept for the Telegram notice.
       - name: Collect
+        id: collect
         env:
           DATA_GO_KR_SERVICE_KEY: ${{ secrets.DATA_GO_KR_SERVICE_KEY }}
           FULL_RUN: ${{ inputs.full }}
         run: |
-          set -eu
+          set -euo pipefail
           python -m tools.certexam.mask_key
+          log="${RUNNER_TEMP}/collect.log"
           if [ "${FULL_RUN:-false}" = "true" ]; then
-            python -m tools.certexam.collect --full
+            python -m tools.certexam.collect --full 2>&1 | tee "${log}"
           else
-            python -m tools.certexam.collect
+            python -m tools.certexam.collect 2>&1 | tee "${log}"
           fi
+          summary="$(grep -m1 '^certexam: items=' "${log}" | sed 's/ calls=.*//' || true)"
+          warnings="$(grep -c '^warning:' "${log}" || true)"
+          echo "summary=${summary}" >> "${GITHUB_OUTPUT}"
+          echo "warnings=${warnings:-0}" >> "${GITHUB_OUTPUT}"
 
       # The token reaches git only in this step, as a per-command header
       # (checkout does not persist credentials).
       - name: Commit changes
+        id: commit
         if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -64,6 +89,7 @@ jobs:
           git add -A certexam
           if git diff --cached --quiet -- certexam; then
             echo "certexam: no changes"
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
           git config user.name "github-actions[bot]"
@@ -77,6 +103,7 @@ jobs:
           for attempt in 1 2 3; do
             if git_auth pull --rebase origin "${GITHUB_REF_NAME}" \
               && git_auth push origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "changed=true" >> "${GITHUB_OUTPUT}"
               exit 0
             fi
             echo "push attempt ${attempt} failed"
@@ -84,3 +111,51 @@ jobs:
             sleep $((attempt * 5))
           done
           exit 1
+
+      - name: Telegram notice
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STATUS: ${{ job.status }}
+          SUMMARY: ${{ steps.collect.outputs.summary }}
+          WARNINGS: ${{ steps.collect.outputs.warnings }}
+          CHANGED: ${{ steps.commit.outputs.changed }}
+          TRIGGER: ${{ github.event_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "${STATUS}" = "success" ]; then
+            mark="✅"
+            if [ "${WARNINGS:-0}" != "0" ]; then mark="⚠️ 경고 ${WARNINGS}건"; fi
+            text="$(printf 'cert-exam-data 수집 %s\n%s\nexams.json 변경: %s\n실행: %s' \
+              "${mark}" "${SUMMARY:-요약 없음}" "${CHANGED:-skipped}" "${TRIGGER}")"
+          else
+            text="$(printf '❌ cert-exam-data 수집 실패 (%s, %s)\n%s' "${STATUS}" "${TRIGGER}" "${RUN_URL}")"
+          fi
+          echo "${text}"
+          if [ -z "${TELEGRAM_BOT_TOKEN}" ] || [ -z "${TELEGRAM_CHAT_ID}" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set; Telegram notices are off"
+            exit 0
+          fi
+          curl --silent --show-error --fail --max-time 15 -o /dev/null \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${text}" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            || echo "::warning::Telegram send failed"
+
+  # Re-enabling an enabled workflow is a no-op that counts as activity, so
+  # the schedule is not paused after 60 quiet days (plan A9). Independent of
+  # the collect job so it runs even when collecting fails.
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-enable this workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api --method PUT "repos/${REPO}/actions/workflows/certexam_collect.yml/enable" --silent \
+            && echo "keepalive: workflow re-enabled" \
+            || echo "::warning::keepalive: could not re-enable the workflow"

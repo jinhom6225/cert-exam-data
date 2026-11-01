@@ -9,7 +9,7 @@ WORKFLOW = (ROOT / ".github" / "workflows" / "certexam_collect.yml").read_text(e
 
 
 def step(name):
-    match = re.search(r"- name: " + re.escape(name) + r"\n(.*?)(?=\n      - name: |\Z)", WORKFLOW, re.S)
+    match = re.search(r"- name: " + re.escape(name) + r"\n(.*?)(?=\n      - name: |\n  \S|\Z)", WORKFLOW, re.S)
     assert match, name
     return match.group(1)
 
@@ -33,10 +33,33 @@ class WorkflowTest(unittest.TestCase):
         commit = step("Commit changes")
         self.assertIn("GH_TOKEN: ${{ github.token }}", commit)
         self.assertIn("if: github.ref == 'refs/heads/main'", commit)
-        self.assertEqual(WORKFLOW.count("github.token"), 1)
+        # The other use is the keepalive job, which only gets actions: write.
+        self.assertEqual(WORKFLOW.count("github.token"), 2)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", step("Re-enable this workflow"))
         self.assertEqual(WORKFLOW.count("secrets.DATA_GO_KR_SERVICE_KEY"), 1)
         self.assertIn("secrets.DATA_GO_KR_SERVICE_KEY", step("Collect"))
         self.assertNotIn("set -x", WORKFLOW)
+
+    def test_keepalive_job_reenables_only_this_workflow(self):
+        self.assertRegex(WORKFLOW, r"(?m)^  keepalive:\n(?:    .*\n)*?    permissions:\n      actions: write\n    steps:$")
+        self.assertNotRegex(WORKFLOW, r"(?m)^  keepalive:\n(?:    .*\n)*?    needs:")
+        keepalive = step("Re-enable this workflow")
+        self.assertIn("actions/workflows/certexam_collect.yml/enable", keepalive)
+        self.assertIn("::warning::", keepalive)
+
+    def test_telegram_secrets_only_in_notice_step(self):
+        notice = step("Telegram notice")
+        self.assertIn("if: always()", notice)
+        for name in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+            self.assertEqual(WORKFLOW.count(f"secrets.{name}"), 1)
+            self.assertIn(f"secrets.{name}", notice)
+        # A missing secret only warns; it never fails the run.
+        self.assertIn("Telegram notices are off", notice)
+        self.assertIn("exit 0", notice)
+
+    def test_forced_failure_is_manual_only(self):
+        self.assertIn("if: inputs.force_fail", step("Forced failure"))
+        self.assertRegex(WORKFLOW, r"force_fail:\n(?:        .*\n)*?        default: false")
 
     def test_rebase_and_push_retry(self):
         commit = step("Commit changes")
