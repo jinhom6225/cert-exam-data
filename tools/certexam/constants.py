@@ -49,7 +49,10 @@ BACKOFF_BASE_SECONDS = 2.0
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 
-# Daily call guard per API (development accounts allow 1,000).
+# Call guard per API for ONE run (a fresh CallBudget each run; development
+# accounts allow 1,000 a day). With two scheduled runs a day (plan A10) the
+# day's total is up to twice this, so keep manual runs to one a day and never
+# run full=true on a day the scheduled runs retried heavily.
 DAILY_CALL_LIMITS = {API_NTQ: 900, API_QUAL: 900, API_JMLIST: 900, API_ALW: 900}
 
 # Soft run deadline from collect start; the workflow times out at 30 minutes.
@@ -57,6 +60,10 @@ DAILY_CALL_LIMITS = {API_NTQ: 900, API_QUAL: 900, API_JMLIST: 900, API_ALW: 900}
 # call (3 attempts x 30 s + 2 s + 4 s backoff).
 RUN_DEADLINE_SECONDS = 25 * 60
 WORST_CALL_SECONDS = TIMEOUT_SECONDS * (RETRIES + 1) + BACKOFF_BASE_SECONDS * 3
+
+# Plan A10: runs starting at or after this KST hour (the 15:10 run) ask for
+# fees before getJMList, so the morning run's getJMList cannot starve them.
+FEES_FIRST_FROM_KST_HOUR = 12
 
 QUAL_PAGE_SIZE = 50  # API limit: more answers resultCode 930
 QUAL_MAX_PAGES = 20

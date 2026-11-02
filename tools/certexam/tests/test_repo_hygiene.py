@@ -57,6 +57,10 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("Telegram notices are off", notice)
         self.assertIn("exit 0", notice)
 
+    def test_two_daily_runs_morning_and_afternoon_kst(self):
+        # Plan A10: 03:10 and 15:10 KST (the afternoon run asks for fees first).
+        self.assertEqual(re.findall(r'(?m)^    - cron: "([^"]+)"', WORKFLOW), ["10 18 * * *", "10 6 * * *"])
+
     def test_forced_failure_is_manual_only(self):
         self.assertIn("if: inputs.force_fail", step("Forced failure"))
         self.assertRegex(WORKFLOW, r"force_fail:\n(?:        .*\n)*?        default: false")

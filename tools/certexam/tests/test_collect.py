@@ -351,6 +351,60 @@ class LiveModeRulesTest(unittest.TestCase):
             self.assertEqual(result.code, 0, result.text)
             self.assertIn("always-held list skipped", result.out)
 
+    # Plan A10: the 03:10 KST run keeps getJMList -> getFeeList; the 15:10
+    # KST run (same weekday, same targets) asks for fees first, because the
+    # morning run spends its whole deadline on getJMList.
+    AFTERNOON_RUN = SUNDAY_RUN + timedelta(hours=12)  # 2026-11-01 15:10 KST
+
+    def first_index(self, requests, operation):
+        return [r.operation for r in requests if r.param("jmCd")].index(operation)
+
+    def test_morning_run_calls_get_jm_list_before_get_fee_list(self):
+        with temp_dir() as tmp:
+            result = run_collect(["--out", str(tmp / "x.json")])
+        self.assertEqual(result.code, 0, result.text)
+        requests = result.transport.requests
+        self.assertLess(self.first_index(requests, "getJMList"), self.first_index(requests, "getFeeList"))
+
+    def test_afternoon_run_calls_get_fee_list_first_for_the_same_targets(self):
+        self.assertEqual(kst_now(self.AFTERNOON_RUN).weekday(), kst_now(SUNDAY_RUN).weekday())
+        self.assertEqual(kst_now(self.AFTERNOON_RUN).hour, 15)
+        with temp_dir() as tmp:
+            morning = run_collect(["--out", str(tmp / "m.json")])
+            afternoon = run_collect(["--out", str(tmp / "a.json")], clock=FakeClock(self.AFTERNOON_RUN))
+        self.assertEqual(afternoon.code, 0, afternoon.text)
+        requests = afternoon.transport.requests
+        self.assertLess(self.first_index(requests, "getFeeList"), self.first_index(requests, "getJMList"))
+        last_fee = max(i for i, r in enumerate(requests) if r.operation == "getFeeList")
+        first_jm = next(i for i, r in enumerate(requests) if r.operation == "getJMList")
+        self.assertLess(last_fee, first_jm)
+        for operation in ("getJMList", "getFeeList"):
+            def codes(result):
+                return sorted(r.param("jmCd") for r in result.transport.requests if r.operation == operation)
+            self.assertEqual(codes(afternoon), codes(morning))
+        # Qual verdicts still come first in both runs.
+        self.assertLess(self.first_index(requests, "getQualExamSchdList"), self.first_index(requests, "getFeeList"))
+
+    def test_fees_first_starts_at_12_00_kst(self):
+        for minutes, first in ((49, "getJMList"), (50, "getFeeList")):  # 11:59 / 12:00 KST
+            when = SUNDAY_RUN + timedelta(hours=8, minutes=minutes)
+            with temp_dir() as tmp:
+                result = run_collect(["--out", str(tmp / "x.json")], clock=FakeClock(when))
+            self.assertEqual(result.code, 0, result.text)
+            per_item = [r.operation for r in result.transport.requests if r.operation in ("getJMList", "getFeeList")]
+            self.assertEqual(per_item[0], first, kst_now(when))
+
+    def test_afternoon_deadline_fills_fees_and_skips_get_jm_list(self):
+        transport = ScriptedTransport(lambda request: None)
+        fee_count = len([c for i, c in enumerate(JM_CODES) if i % 7 == 6])
+        clock = RequestClock(self.AFTERNOON_RUN, transport, lambda r: r.operation == "getFeeList", fee_count)
+        with temp_dir() as tmp:
+            result = run_collect(["--out", str(tmp / "x.json")], transport=transport, clock=clock)
+        self.assertEqual(result.code, 0, result.text)
+        self.assertIn(f"getFeeList={fee_count}/{fee_count} ", result.out)
+        self.assertIn(f"getJMList=0/{fee_count} ", result.out)
+        self.assertEqual([r for r in transport.requests if r.operation == "getJMList"], [])
+
     def test_daily_qual_item_calls_for_every_craftsman_before_get_jm_list(self):
         with temp_dir() as tmp:
             result = run_collect(["--out", str(tmp / "x.json")])

@@ -14,8 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, NoReturn, Optional, Sequence, TextIO, Tuple
 
-from .budget import CallBudget, plan_run, should_fetch_jm_list
+from .budget import CallBudget, kst_now, plan_run, should_fetch_jm_list
 from .constants import (
+    FEES_FIRST_FROM_KST_HOUR,
     KEY_ENV,
     MAX_ITEM_COUNT_DROP_PERCENT,
     PER_ITEM_WARN_PERCENT,
@@ -211,7 +212,8 @@ def _collect(
 
     # Per-item calls: qualExamSchd verdicts first (https, fast and reliable;
     # capped at a third of the time left for per-item calls so getJMList is
-    # not starved), then the getJMList rotation, then getFeeList.
+    # not starved), then the getJMList rotation and getFeeList — fees first
+    # in the afternoon run (plan A10), getJMList first otherwise.
     per_item_start = deps.monotonic()
     last_call_start = started + RUN_DEADLINE_SECONDS - WORST_CALL_SECONDS
     time_left = max(0.0, last_call_start - per_item_start)
@@ -229,10 +231,21 @@ def _collect(
     )
     verdicts = fetch_qual_verdicts(client, craftsmen, plan.kst_year, qual_out_of_time, log)
     warn_qual_failures(verdicts, craftsmen, log)
-    schedules = fetch_per_item(
-        client, "getJMList", plan.jm_targets, parse_item_schedule, out_of_time, log
-    )
-    fees = fetch_per_item(client, "getFeeList", plan.fee_targets, parse_fee, out_of_time, log)
+
+    def fetch_schedules() -> ItemFetch:
+        return fetch_per_item(
+            client, "getJMList", plan.jm_targets, parse_item_schedule, out_of_time, log
+        )
+
+    def fetch_fees() -> ItemFetch:
+        return fetch_per_item(client, "getFeeList", plan.fee_targets, parse_fee, out_of_time, log)
+
+    if kst_now(now).hour >= FEES_FIRST_FROM_KST_HOUR:
+        fees = fetch_fees()
+        schedules = fetch_schedules()
+    else:
+        schedules = fetch_schedules()
+        fees = fetch_fees()
     warn_item_failures("getJMList", schedules, plan.jm_targets, log)
     warn_item_failures("getFeeList", fees, plan.fee_targets, log)
     previous_items = {

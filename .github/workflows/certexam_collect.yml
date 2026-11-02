@@ -1,8 +1,9 @@
 name: certexam collect
 
-# Builds certexam/exams.json for the cert_exam_alert app once a day
-# (03:10 KST). Fails without committing when a call or validation fails,
-# so the app keeps yesterday's copy.
+# Builds certexam/exams.json for the cert_exam_alert app twice a day
+# (03:10 and 15:10 KST, plan A10; both runs cover the same weekday items and
+# the 15:10 run asks for fees before getJMList). Fails without committing
+# when a core call or validation fails, so the app keeps the last copy.
 #
 # Every run also (plan A9):
 #   - sends a Telegram notice: a one-line summary on success, the run URL
@@ -12,7 +13,8 @@ name: certexam collect
 
 on:
   schedule:
-    - cron: "10 18 * * *"
+    - cron: "10 18 * * *"  # 03:10 KST
+    - cron: "10 6 * * *"   # 15:10 KST (fees first)
   workflow_dispatch:
     inputs:
       full:
