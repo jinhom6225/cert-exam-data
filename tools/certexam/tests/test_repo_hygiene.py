@@ -61,6 +61,14 @@ class WorkflowTest(unittest.TestCase):
         # Plan A10: 03:10 and 15:10 KST (the afternoon run asks for fees first).
         self.assertEqual(re.findall(r'(?m)^    - cron: "([^"]+)"', WORKFLOW), ["10 18 * * *", "10 6 * * *"])
 
+    def test_fees_first_only_for_the_1510_kst_schedule(self):
+        # Plan A11: the order follows the schedule that started the run.
+        collect = step("Collect")
+        self.assertIn("FEES_FIRST: ${{ github.event.schedule == '10 6 * * *' }}", collect)
+        self.assertEqual(WORKFLOW.count("args+=(--fees-first)"), 1)
+        self.assertIn('if [ "${FEES_FIRST:-false}" = "true" ]; then args+=(--fees-first); fi', collect)
+        self.assertIn('if [ "${FULL_RUN:-false}" = "true" ]; then args+=(--full); fi', collect)
+
     def test_forced_failure_is_manual_only(self):
         self.assertIn("if: inputs.force_fail", step("Forced failure"))
         self.assertRegex(WORKFLOW, r"force_fail:\n(?:        .*\n)*?        default: false")

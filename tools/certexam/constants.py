@@ -61,10 +61,6 @@ DAILY_CALL_LIMITS = {API_NTQ: 900, API_QUAL: 900, API_JMLIST: 900, API_ALW: 900}
 RUN_DEADLINE_SECONDS = 25 * 60
 WORST_CALL_SECONDS = TIMEOUT_SECONDS * (RETRIES + 1) + BACKOFF_BASE_SECONDS * 3
 
-# Plan A10: runs starting at or after this KST hour (the 15:10 run) ask for
-# fees before getJMList, so the morning run's getJMList cannot starve them.
-FEES_FIRST_FROM_KST_HOUR = 12
-
 QUAL_PAGE_SIZE = 50  # API limit: more answers resultCode 930
 QUAL_MAX_PAGES = 20
 # Plan A7: per-item qualExamSchd for every 기능사 item, verdict only.

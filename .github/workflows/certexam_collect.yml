@@ -2,7 +2,7 @@ name: certexam collect
 
 # Builds certexam/exams.json for the cert_exam_alert app twice a day
 # (03:10 and 15:10 KST, plan A10; both runs cover the same weekday items and
-# the 15:10 run asks for fees before getJMList). Fails without committing
+# the 15:10 schedule passes --fees-first, plan A11). Fails without committing
 # when a core call or validation fails, so the app keeps the last copy.
 #
 # Every run also (plan A9):
@@ -65,15 +65,18 @@ jobs:
         env:
           DATA_GO_KR_SERVICE_KEY: ${{ secrets.DATA_GO_KR_SERVICE_KEY }}
           FULL_RUN: ${{ inputs.full }}
+          # Plan A11: fees first only for the 15:10 KST schedule, however late
+          # GitHub starts it.
+          FEES_FIRST: ${{ github.event.schedule == '10 6 * * *' }}
         run: |
           set -euo pipefail
           python -m tools.certexam.mask_key
           log="${RUNNER_TEMP}/collect.log"
-          if [ "${FULL_RUN:-false}" = "true" ]; then
-            python -m tools.certexam.collect --full 2>&1 | tee "${log}"
-          else
-            python -m tools.certexam.collect 2>&1 | tee "${log}"
-          fi
+          args=()
+          if [ "${FULL_RUN:-false}" = "true" ]; then args+=(--full); fi
+          if [ "${FEES_FIRST:-false}" = "true" ]; then args+=(--fees-first); fi
+          # ${args[@]+...} keeps an empty list safe under set -u on any bash.
+          python -m tools.certexam.collect ${args[@]+"${args[@]}"} 2>&1 | tee "${log}"
           summary="$(grep -m1 '^certexam: items=' "${log}" | sed 's/ calls=.*//' || true)"
           warnings="$(grep -c '^warning:' "${log}" || true)"
           echo "summary=${summary}" >> "${GITHUB_OUTPUT}"
