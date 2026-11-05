@@ -78,7 +78,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--fees-first",
         action="store_true",
-        help="call getFeeList before getJMList (the 15:10 KST schedule, plan A11)",
+        help="call getFeeList first, then getJMList from the end (15:10 KST schedule, plan A11/A12)",
     )
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--previous", type=Path, help="previous exams.json (default: --out)")
@@ -217,9 +217,9 @@ def _collect(
     # Per-item calls: qualExamSchd verdicts first (https, fast and reliable;
     # capped at a third of the time left for per-item calls so getJMList is
     # not starved), then the getJMList rotation and getFeeList — fees first
-    # with --fees-first (the 15:10 KST schedule, plan A10/A11), getJMList
-    # first otherwise. The workflow decides, not the clock: schedules start
-    # hours late.
+    # and getJMList from the end with --fees-first (the 15:10 KST schedule,
+    # plan A10-A12), getJMList ascending first otherwise. The workflow decides,
+    # not the clock: schedules start hours late.
     per_item_start = deps.monotonic()
     last_call_start = started + RUN_DEADLINE_SECONDS - WORST_CALL_SECONDS
     time_left = max(0.0, last_call_start - per_item_start)
@@ -239,9 +239,10 @@ def _collect(
     warn_qual_failures(verdicts, craftsmen, log)
 
     def fetch_schedules() -> ItemFetch:
-        return fetch_per_item(
-            client, "getJMList", plan.jm_targets, parse_item_schedule, out_of_time, log
-        )
+        # Plan A12: the fees-first run walks getJMList from the end, so the two
+        # daily runs cover the front and the back of the weekday list.
+        targets = tuple(reversed(plan.jm_targets)) if args.fees_first else plan.jm_targets
+        return fetch_per_item(client, "getJMList", targets, parse_item_schedule, out_of_time, log)
 
     def fetch_fees() -> ItemFetch:
         return fetch_per_item(client, "getFeeList", plan.fee_targets, parse_fee, out_of_time, log)

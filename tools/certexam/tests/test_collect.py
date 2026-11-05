@@ -404,6 +404,49 @@ class LiveModeRulesTest(unittest.TestCase):
         self.assertIn(f"getJMList=0/{fee_count} ", result.out)
         self.assertEqual([r for r in transport.requests if r.operation == "getJMList"], [])
 
+    # Plan A12: the 15:10 run (--fees-first) walks getJMList from the end, so
+    # the two daily runs split the weekday list instead of both retrying the
+    # front and never reaching the tail.
+    def jm_order(self, result):
+        return [r.param("jmCd") for r in result.transport.requests if r.operation == "getJMList"]
+
+    def test_fees_first_calls_get_jm_list_in_descending_order(self):
+        with temp_dir() as tmp:
+            plain = run_collect(["--out", str(tmp / "m.json")])
+            fees_first = run_collect(["--out", str(tmp / "a.json"), "--fees-first"])
+        self.assertEqual(fees_first.code, 0, fees_first.text)
+        self.assertEqual(self.jm_order(plain), sorted(self.jm_order(plain)))
+        self.assertEqual(self.jm_order(fees_first), sorted(self.jm_order(plain), reverse=True))
+        fee_order = [r.param("jmCd") for r in fees_first.transport.requests if r.operation == "getFeeList"]
+        self.assertEqual(fee_order, sorted(fee_order))  # fees keep their order
+
+    def test_fees_first_deadline_skips_the_front_of_the_list(self):
+        targets = [c for i, c in enumerate(JM_CODES) if i % 7 == 6]
+        half = len(targets) // 2
+        for flag, expect_tried in (([], targets[:half]), (["--fees-first"], targets[::-1][:half])):
+            transport = ScriptedTransport(lambda request: None)
+            # The deadline hits once `half` getJMList items were sent (fees do not count).
+            clock = RequestClock(SUNDAY_RUN, transport, lambda r: r.operation == "getJMList", half)
+            with temp_dir() as tmp:
+                result = run_collect(["--out", str(tmp / "x.json"), *flag], transport=transport, clock=clock)
+            self.assertEqual(result.code, 0, result.text)
+            self.assertEqual(self.jm_order(result), expect_tried, flag)
+            self.assertIn(f"getJMList={half}/{len(targets)} ", result.out)
+            skipped_fees = 0 if flag else len(targets)  # without --fees-first the fees come after the deadline
+            self.assertIn(f"skippedAtDeadline={len(targets) - half + skipped_fees} ", result.out)
+
+    def test_two_daily_runs_together_try_every_get_jm_list_target(self):
+        targets = [c for i, c in enumerate(JM_CODES) if i % 7 == 6]
+        tried = set()
+        for flag in ([], ["--fees-first"]):
+            transport = ScriptedTransport(lambda request: None)
+            clock = RequestClock(SUNDAY_RUN, transport, lambda r: r.operation == "getJMList", len(targets) // 2 + 1)
+            with temp_dir() as tmp:
+                result = run_collect(["--out", str(tmp / "x.json"), *flag], transport=transport, clock=clock)
+            self.assertEqual(result.code, 0, result.text)
+            tried |= set(self.jm_order(result))
+        self.assertEqual(tried, set(targets))
+
     def test_daily_qual_item_calls_for_every_craftsman_before_get_jm_list(self):
         with temp_dir() as tmp:
             result = run_collect(["--out", str(tmp / "x.json")])
