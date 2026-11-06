@@ -16,6 +16,7 @@ Source: 공공데이터포털 (한국산업인력공단 제공), https://www.dat
   `tools/certexam/README.md` for local runs and exit codes.
 - Workflow: `.github/workflows/certexam_collect.yml` (03:10 and 15:10 KST; the
   15:10 run asks for fees first and walks getJMList from the end, plan A12;
+  기능사 items go last in both runs, plan A13;
   manual run with `full=true` fetches every exam item once — keep manual runs to one a day: the two scheduled runs already use
   about 660 of the 1,000 daily qualExamSchd calls and up to ~300 (more with
   retries) of the q-net getJMList/getFeeList calls, and a `full=true` run adds

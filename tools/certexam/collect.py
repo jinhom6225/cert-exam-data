@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Mapping, NoReturn, Optional, Sequence, TextIO, Tuple
+from typing import AbstractSet, Callable, Dict, List, Mapping, NoReturn, Optional, Sequence, TextIO, Tuple
 
 from .budget import CallBudget, plan_run, should_fetch_jm_list
 from .constants import (
@@ -78,7 +78,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--fees-first",
         action="store_true",
-        help="call getFeeList first, then getJMList from the end (15:10 KST schedule, plan A11/A12)",
+        help="call getFeeList first, then getJMList from the end (15:10 KST schedule, plan A11-A13)",
     )
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--previous", type=Path, help="previous exams.json (default: --out)")
@@ -218,8 +218,9 @@ def _collect(
     # capped at a third of the time left for per-item calls so getJMList is
     # not starved), then the getJMList rotation and getFeeList — fees first
     # and getJMList from the end with --fees-first (the 15:10 KST schedule,
-    # plan A10-A12), getJMList ascending first otherwise. The workflow decides,
-    # not the clock: schedules start hours late.
+    # plan A10-A12), getJMList ascending first otherwise; 기능사 items last in
+    # both runs (plan A13). The workflow decides, not the clock: schedules
+    # start hours late.
     per_item_start = deps.monotonic()
     last_call_start = started + RUN_DEADLINE_SECONDS - WORST_CALL_SECONDS
     time_left = max(0.0, last_call_start - per_item_start)
@@ -239,9 +240,7 @@ def _collect(
     warn_qual_failures(verdicts, craftsmen, log)
 
     def fetch_schedules() -> ItemFetch:
-        # Plan A12: the fees-first run walks getJMList from the end, so the two
-        # daily runs cover the front and the back of the weekday list.
-        targets = tuple(reversed(plan.jm_targets)) if args.fees_first else plan.jm_targets
+        targets = get_jm_list_order(plan.jm_targets, set(craftsmen), descending=args.fees_first)
         return fetch_per_item(client, "getJMList", targets, parse_item_schedule, out_of_time, log)
 
     def fetch_fees() -> ItemFetch:
@@ -280,6 +279,19 @@ def _collect(
         previous_items,
         verdicts,
         len(craftsmen),
+    )
+
+
+def get_jm_list_order(
+    targets: Sequence[str], craftsmen: AbstractSet[str], descending: bool
+) -> Tuple[str, ...]:
+    """getJMList call order. Plan A12: the fees-first run walks from the end,
+    so the two daily runs cover the front and the back of the weekday list.
+    Plan A13: 기능사 items go last in both runs — q-net getJMList almost always
+    times out for them, and their dates come from the grade lists anyway."""
+    ordered = sorted(targets, reverse=descending)
+    return tuple(code for code in ordered if code not in craftsmen) + tuple(
+        code for code in ordered if code in craftsmen
     )
 
 
